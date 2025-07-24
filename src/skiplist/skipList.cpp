@@ -11,28 +11,38 @@ namespace tiny_lsm {
 // ************************ SkipListIterator ************************
 BaseIterator &SkipListIterator::operator++() {
   // TODO: Lab1.2 任务：实现SkipListIterator的++操作符
+  if (current != nullptr) {
+    current = current->forward_[0];
+  }
   return *this;
 }
 
 bool SkipListIterator::operator==(const BaseIterator &other) const {
   // TODO: Lab1.2 任务：实现SkipListIterator的==操作符
-  return true;
+  if (other.get_type() != IteratorType::SkipListIterator) {
+    return false;        
+  }
+  auto skip_list_iter = dynamic_cast<const SkipListIterator&>(other);
+  return current == skip_list_iter.current;
 }
 
 bool SkipListIterator::operator!=(const BaseIterator &other) const {
   // TODO: Lab1.2 任务：实现SkipListIterator的!=操作符
-  return true;
+  return !(*this == other);
 }
 
 SkipListIterator::value_type SkipListIterator::operator*() const {
   // TODO: Lab1.2 任务：实现SkipListIterator的*操作符
-  return {"", ""};
+  if (current == nullptr) {
+    throw std::runtime_error("Dereferencing invalid iterator");
+  }
+  return {current->key_, current->value_};
 }
 
 IteratorType SkipListIterator::get_type() const {
   // TODO: Lab1.2 任务：实现SkipListIterator的get_type
   // ? 主要是为了熟悉基类的定义和继承关系
-  return IteratorType::Undefined;
+  return IteratorType::SkipListIterator;
 }
 
 bool SkipListIterator::is_valid() const {
@@ -60,12 +70,11 @@ int SkipList::random_level() {
   // ? - 层数范围限制在[1, max_level]之间，避免浪费内存
   // TODO: Lab1.1 任务：插入时随机为这一次操作确定其最高连接的链表层数
 
-    int level = 1;
+  int level = 1;
 
-    while (dis_01(gen) == 1 && level < max_level) {
-        ++level;
-    }
-
+  while (dis_01(gen) == 1 && level < max_level) {
+    ++level;
+  }
   return level;
 }
 
@@ -79,66 +88,66 @@ void SkipList::put(const std::string &key, const std::string &value,
   // ? 你可能需要使用到`random_level`函数以确定层数, 其注释中为你提供一种思路
   // ? tranc_id 为事务id, 现在你不需要关注它, 直接将其传递到 SkipListNode 的构造函数中即可
 
-    std::vector<std::shared_ptr<SkipListNode>> update(max_level, nullptr);
-    int new_level = std::max(random_level(), current_level);
-    std::shared_ptr<SkipListNode> new_node = std::make_shared<SkipListNode>(key, value, new_level, tranc_id);
-    
-    std::shared_ptr<SkipListNode> current = head;
+  std::vector<std::shared_ptr<SkipListNode>> update(max_level, nullptr);
+  int new_level = std::max(random_level(), current_level);
+  std::shared_ptr<SkipListNode> new_node = std::make_shared<SkipListNode>(key, value, new_level, tranc_id);
+  
+  std::shared_ptr<SkipListNode> current = head;
 
-    for (int i = current_level - 1; i >= 0; --i) {
-        while (current->forward_[i] != nullptr && *current->forward_[i] < *new_node) {
-            current = current->forward_[i];
-        }
-
-        spdlog::trace("SkipList--put({}, {}, {}), level{} needs updating", key, value, tranc_id, i);
-
-        update[i] = current;
+  for (int i = current_level - 1; i >= 0; --i) {
+    while (current->forward_[i] != nullptr && *current->forward_[i] < *new_node) {
+      current = current->forward_[i];
     }
 
-    current = current->forward_[0];
+    spdlog::trace("SkipList--put({}, {}, {}), level{} needs updating", key, value, tranc_id, i);
 
-    if (current != nullptr && current->key_ == key && current->tranc_id_ == tranc_id) {
-        size_bytes += value.size() - current->value_.size();
-        current->value_ = value;
-        current->tranc_id_ = tranc_id;
+    update[i] = current;
+  }
 
-        spdlog::trace("SkipList--put({}, {}, {}), key and tranc_id is the same, only update value to {}",
-            key, value, tranc_id, value);
+  current = current->forward_[0];
 
-        return;
+  if (current != nullptr && current->key_ == key && current->tranc_id_ == tranc_id) {
+    size_bytes += value.size() - current->value_.size();
+    current->value_ = value;
+    current->tranc_id_ = tranc_id;
+
+    spdlog::trace("SkipList--put({}, {}, {}), key and tranc_id is the same, only update value to {}",
+        key, value, tranc_id, value);
+
+    return;
+  }
+
+  if (new_level > current_level) {
+    for (int i = current_level; i < new_level; ++i) {
+        update[i] = head;
+
+        spdlog::trace("SkipList--put({}, {}, {}), update level{} to head", key, value, tranc_id, i);
+    }
+  }
+
+  int random_bits = dis_level(gen);
+
+  size_bytes += key.size() + value.size() + sizeof(uint64_t);
+
+  for (int i = 0; i < new_level; ++i) {
+    bool need_update = false;
+    if (i == 0 || (new_level > current_level) || (random_bits & (1 << i))) {
+      need_update = true;
     }
 
-    if (new_level > current_level) {
-        for (int i = current_level; i < new_level; ++i) {
-            update[i] = head;
-
-            spdlog::trace("SkipList--put({}, {}, {}), update level{} to head", key, value, tranc_id, i);
-        }
+    if (need_update) {
+      new_node->forward_[i] = update[i]->forward_[i];
+      if (new_node->forward_[i] != nullptr) {
+          new_node->forward_[i]->set_backward(i, new_node);
+      }
+      update[i]->forward_[i] = new_node;
+      new_node->set_backward(i, update[i]);
+    } else {
+      break;
     }
+  }
 
-    int random_bits = dis_level(gen);
-
-    size_bytes += key.size() + value.size() + sizeof(uint64_t);
-
-    for (int i = 0; i < new_level; ++i) {
-        bool need_update = false;
-        if (i == 0 || (new_level > current_level) || (random_bits & (1 << i))) {
-            need_update = true;
-        }
-
-        if (need_update) {
-            new_node->forward_[i] = update[i]->forward_[i];
-            if (new_node->forward_[i] != nullptr) {
-                new_node->forward_[i]->set_backward(i, new_node);
-            }
-            update[i]->forward_[i] = new_node;
-            new_node->set_backward(i, update[i]);
-        } else {
-            break;
-        }
-    }
-
-    current_level = new_level;
+  current_level = new_level;
 }
 
 // 查找键值对
@@ -149,37 +158,37 @@ SkipListIterator SkipList::get(const std::string &key, uint64_t tranc_id) {
 
   // TODO: Lab1.1 任务：实现查找键值对,
   // TODO: 并且你后续需要额外实现SkipListIterator中的TODO部分(Lab1.2)
-    spdlog::trace("SkipList--get({}) called", key);
+  spdlog::trace("SkipList--get({}) called", key);
 
-    std::shared_ptr<SkipListNode> current = head;
+  std::shared_ptr<SkipListNode> current = head;
 
-    for (int i = current_level - 1; i >= 0; --i) {
-        while (current->forward_[i] != nullptr && current->forward_[i]->key_ < key) {
-            current = current->forward_[i];
-        }
+  for (int i = current_level - 1; i >= 0; --i) {
+    while (current->forward_[i] != nullptr && current->forward_[i]->key_ < key) {
+      current = current->forward_[i];
     }
+  }
 
-    current = current->forward_[0];
+  current = current->forward_[0];
 
-    if (tranc_id == 0) {
-        if (current != nullptr && current->key_ == key) {
-            return SkipListIterator(current);
-        }
-    } else {
-        while (current != nullptr && current->key_ == key) {
-            if (tranc_id != 0) {
-                if (current->tranc_id_ <= tranc_id) {
-                    return SkipListIterator(current);
-                } else {
-                    current = current->forward_[0];
-                }
-            } else {
-                return SkipListIterator(current);
-            }
-        }
+  if (tranc_id == 0) {
+    if (current != nullptr && current->key_ == key) {
+      return SkipListIterator(current);
     }
+  } else {
+    while (current != nullptr && current->key_ == key) {
+      if (tranc_id != 0) {
+        if (current->tranc_id_ <= tranc_id) {
+          return SkipListIterator(current);
+        } else {
+          current = current->forward_[0];
+        }
+      } else {
+        return SkipListIterator(current);
+      }
+    }
+  }
 
-    spdlog::trace("SkipList--get({}): not found", key);
+  spdlog::trace("SkipList--get({}): not found", key);
 
   return SkipListIterator{};
 }
@@ -189,40 +198,40 @@ SkipListIterator SkipList::get(const std::string &key, uint64_t tranc_id) {
 // ! 这里只是为了实现完整的 SkipList 不会真正被上层调用
 void SkipList::remove(const std::string &key) {
   // TODO: Lab1.1 任务：实现删除键值对
-    std::vector<std::shared_ptr<SkipListNode>> update(max_level, nullptr);
+  std::vector<std::shared_ptr<SkipListNode>> update(max_level, nullptr);
 
-    std::shared_ptr<SkipListNode> current = head;
+  std::shared_ptr<SkipListNode> current = head;
 
-    for (int i = current_level - 1; i >= 0; --i) {
-        while (current->forward_[i] != nullptr && current->forward_[i]->key_ < key) {
-            current = current->forward_[i];
-        }
-
-        update[i] = current;
+  for (int i = current_level - 1; i >= 0; --i) {
+    while (current->forward_[i] != nullptr && current->forward_[i]->key_ < key) {
+      current = current->forward_[i];
     }
 
-    current = current->forward_[0];
+    update[i] = current;
+  }
 
-    if (current != nullptr && current->key_ == key) {
-        for (int i = 0; i < current_level; ++i) {
-            if (update[i]->forward_[i] != current) {
-                break;
-            }
-            update[i]->forward_[i] = current->forward_[i];
+  current = current->forward_[0];
+
+  if (current != nullptr && current->key_ == key) {
+    for (int i = 0; i < current_level; ++i) {
+      if (update[i]->forward_[i] != current) {
+          break;
         }
-
-        for (int i = 0; i < current->backward_.size() && i < current_level; ++i) {
-            if (current->forward_[i] != nullptr) {
-                current->forward_[i]->set_backward(i, update[i]);
-            }
-        }
-
-        size_bytes -= key.size() + current->value_.size() + sizeof(uint64_t);
-
-        while (current_level > 1 && head->forward_[current_level - 1] == nullptr) {
-            --current_level;
-        }
+      update[i]->forward_[i] = current->forward_[i];
     }
+
+    for (int i = 0; i < current->backward_.size() && i < current_level; ++i) {
+      if (current->forward_[i] != nullptr) {
+        current->forward_[i]->set_backward(i, update[i]);
+      }
+    }
+
+    size_bytes -= key.size() + current->value_.size() + sizeof(uint64_t);
+
+    while (current_level > 1 && head->forward_[current_level - 1] == nullptr) {
+      --current_level;
+    }
+  }
 }
 
 // 刷盘时可以直接遍历最底层链表
