@@ -276,13 +276,49 @@ SkipListIterator SkipList::end() {
 // 返回第一个前缀匹配或者大于前缀的迭代器
 SkipListIterator SkipList::begin_preffix(const std::string &preffix) {
   // TODO: Lab1.3 任务：实现前缀查询的起始位置
-  return SkipListIterator{};
+  spdlog::trace("SkipList--begin_preffix('{}') called", preffix);
+
+  std::shared_ptr<SkipListNode> current = head;
+  for (int i = current_level - 1; i >= 0; --i) {
+    while (current->forward_[i] != nullptr && current->forward_[i]->key_ < preffix) {
+      current = current->forward_[i];
+    }
+  }
+
+  current = current->forward_[0];
+  if (current != nullptr && current->key_ == preffix) {
+    spdlog::trace("SkipList--begin_preffix('{}'): first match at '{}'", preffix, current->key_);
+  }
+
+  return SkipListIterator(current);
 }
 
 // 找到前缀的终结位置
 SkipListIterator SkipList::end_preffix(const std::string &prefix) {
   // TODO: Lab1.3 任务：实现前缀查询的终结位置
-  return SkipListIterator{};
+  spdlog::trace("SkipList--end_preffix('{}') called", prefix);
+  
+  std::shared_ptr<SkipListNode> current = head;
+
+  for (int i = current_level - 1; i >= 0; --i) {
+    while (current->forward_[i] != nullptr && current->forward_[i]->key_ < prefix) {
+      current = current->forward_[i];
+    }
+  }
+
+  current = current->forward_[0];
+
+  while (current != nullptr && current->key_.substr(0, prefix.length()) == prefix) {
+    current = current->forward_[0];
+  }
+
+  if (current != nullptr) {
+    spdlog::trace("SkipList--begin_preffix('{}'): end at '{}'", prefix, current->key_);
+  } else {
+    spdlog::trace("SkipList--begin_preffix('{}'): end at the skiplist end", prefix);
+  }
+
+  return SkipListIterator(current);
 }
 
 // ? 这里单调谓词的含义是, 整个数据库只会有一段连续区间满足此谓词
@@ -299,7 +335,88 @@ std::optional<std::pair<SkipListIterator, SkipListIterator>>
 SkipList::iters_monotony_predicate(
     std::function<int(const std::string &)> predicate) {
   // TODO: Lab1.3 任务：实现谓词查询的起始位置
-  return std::nullopt;
+  std::shared_ptr<SkipListNode> current = head;
+  SkipListIterator begin_iter = SkipListIterator(nullptr);
+  SkipListIterator end_iter = SkipListIterator(nullptr);
+
+  bool found = false;
+  for (int i = current_level - 1; i >= 0; --i) {
+    while (!found) {
+      std::shared_ptr<SkipListNode> forward_i = current->forward_[i];
+      if (forward_i == nullptr) {
+        break;
+      }
+
+      int direction = predicate(forward_i->key_);
+      if (direction == 0) {
+        found = true;
+        current = forward_i;
+        break;
+      } else if (direction < 0) {
+        break;
+      } else {
+        current = forward_i;
+      }
+    }
+  }
+
+  if (!found) {
+    spdlog::trace("SkipList--iters_monotony_predicate(): no match found");
+
+    return std::nullopt;
+  }
+
+  std::shared_ptr<SkipListNode> end = current;
+
+  for (int i = current->backward_.size() - 1; i >= 0; --i) {
+    while (true) {
+      if (current->backward_[i].lock() == nullptr || current->backward_[i].lock() == head) {
+        break;
+      }
+
+      int direction = predicate(current->backward_[i].lock()->key_);
+      if (direction == 0) {
+        current = current->backward_[i].lock();
+        continue;
+      } else if (direction > 0) {
+        break;
+      } else {
+        spdlog::error("iters_predicate: invalid direction");
+
+        throw std::runtime_error("iters_predicate: invalid direction");
+      }
+    }
+  }
+
+  begin_iter = SkipListIterator(current);
+
+  for (int i = end->backward_.size() - 1; i >= 0; --i) {
+    while (true) {
+      if (end->forward_[i] == nullptr) {
+        break;
+      }
+
+      int direction = predicate(end->forward_[i]->key_);
+      if (direction == 0) {
+        end = end->forward_[i];
+        continue;
+      } else if (direction < 0) {
+        break;
+      } else {
+        spdlog::error("iters_predicate: invalid direction");
+
+        throw std::runtime_error("iters_predicate: invalid direction");
+      }
+    }
+  }
+
+  end_iter = SkipListIterator(end);
+
+  ++end_iter;
+
+  spdlog::trace("SkipList--iters_monotony_predicate(): range found");
+
+  return std::make_optional<std::pair<SkipListIterator, SkipListIterator>>(begin_iter, end_iter);
 }
 
 // ? 打印跳表, 你可以在出错时调用此函数进行调试
