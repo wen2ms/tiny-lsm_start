@@ -28,11 +28,21 @@ MemTable::~MemTable() = default;
 void MemTable::put_(const std::string &key, const std::string &value,
                     uint64_t tranc_id) {
   // TODO: Lab2.1 无锁版本的 put
+  current_table->put(key, value, tranc_id);
 }
 
 void MemTable::put(const std::string &key, const std::string &value,
                    uint64_t tranc_id) {
   // TODO: Lab2.1 有锁版本的 put
+  spdlog::trace("MemTable--put({}, {}, {}) called");
+
+  std::unique_lock cur_lock(cur_mtx);
+  put_(key, value, tranc_id);
+  if (current_table->get_size() > TomlConfig::getInstance().getLsmPerMemSizeLimit()) {
+    std::unique_lock frozen_lock(frozen_mtx);
+    frozen_cur_table_();
+    spdlog::debug("MemTable--Current table size exceed limit. Frozen and created new table");
+  }
 }
 
 void MemTable::put_batch(
@@ -40,11 +50,26 @@ void MemTable::put_batch(
     uint64_t tranc_id) {
   // TODO: Lab2.1 有锁版本的 put_batch
   // ? tranc_id 参数可暂时忽略其逻辑判断, 直接插入即可
+  spdlog::trace("MemTable--put_batch with {} keys", kvs.size());
+
+  std::unique_lock cur_lock(cur_mtx);
+  for (auto& [k, v] : kvs) {
+    put_(k, v, tranc_id);
+  }
+  if (current_table->get_size() > TomlConfig::getInstance().getLsmPerMemSizeLimit()) {
+    frozen_cur_table_();
+
+    spdlog::debug("MemTable--Current table size exceed limit after batch put. Frozen and created new table");
+  }
 }
 
 SkipListIterator MemTable::cur_get_(const std::string &key, uint64_t tranc_id) {
   // 检查当前活跃的memtable
   // TODO: Lab2.1 从活跃跳表中查询
+  SkipListIterator result = current_table->get(key, tranc_id);
+  if (result.is_valid()) {
+    return result;
+  }
   return SkipListIterator{};
 }
 
@@ -53,18 +78,53 @@ SkipListIterator MemTable::frozen_get_(const std::string &key,
   // TODO: Lab2.1 从冻结跳表中查询
   // ? 你需要尤其注意跳表的遍历顺序
   // ? tranc_id 参数可暂时忽略, 直接传递参数即可
+  for (std::shared_ptr<SkipList>& table : frozen_tables) {
+    SkipListIterator result = table->get(key, tranc_id);
+    if (result.is_valid()) {
+      return result;
+    }
+  }
+
   return SkipListIterator{};
 }
 
 SkipListIterator MemTable::get(const std::string &key, uint64_t tranc_id) {
   // TODO: Lab2.1 查询, 建议复用 cur_get_ 和 frozen_get_
   // ? 注意并发控制
+  spdlog::trace("MemTable--get({}) called", key);
+
+  std::shared_lock cur_slock(cur_mtx);
+  SkipListIterator cur_res = cur_get_(key, tranc_id);
+  if (cur_res.is_valid()) {
+    return cur_res;
+  }
+  cur_slock.unlock();
+
+  std::shared_lock frozen_slock(frozen_mtx);
+  SkipListIterator frozen_res = frozen_get_(key, tranc_id);
+  if (frozen_res.is_valid()) {
+    return frozen_res;
+  }
+
+  spdlog::trace("MemTable--get({}): key not found", key);
 
   return SkipListIterator{};
 }
 
 SkipListIterator MemTable::get_(const std::string &key, uint64_t tranc_id) {
   // TODO: Lab2.1 查询, 无锁版本
+  spdlog::trace("MemTable--get_({}) called", key);
+
+  SkipListIterator cur_res = cur_get_(key, tranc_id);
+  if (cur_res.is_valid()) {
+    return cur_res;
+  }
+
+  SkipListIterator frozen_res = frozen_get_(key, tranc_id);
+  if (frozen_res.is_valid()) {
+    return frozen_res;
+  }
+
   return SkipListIterator{};
 }
 
@@ -138,15 +198,39 @@ MemTable::get_batch(const std::vector<std::string> &keys, uint64_t tranc_id) {
 
 void MemTable::remove_(const std::string &key, uint64_t tranc_id) {
   // TODO Lab2.1 无锁版本的remove
+  spdlog::trace("MemTable--remove_({}) called", key);
+
+  current_table->put(key, "", tranc_id);
 }
 
 void MemTable::remove(const std::string &key, uint64_t tranc_id) {
   // TODO Lab2.1 有锁版本的remove
+  spdlog::trace("MemTable--remove({}) called", key);
+
+  std::unique_lock lock(cur_mtx);
+  remove_(key, tranc_id);
+  if (current_table->get_size() > TomlConfig::getInstance().getLsmPerMemSizeLimit()) {
+    std::unique_lock frozen_lock(frozen_mtx);
+    frozen_cur_table_();
+
+    spdlog::debug("MemTable--Current table size exceeded limit after remove. "
+                  "Frozen and created new table.");
+  }
 }
 
 void MemTable::remove_batch(const std::vector<std::string> &keys,
                             uint64_t tranc_id) {
   // TODO Lab2.1 有锁版本的remove_batch
+  std::unique_lock lock(cur_mtx);
+
+  for (const std::string& key : keys) {
+    remove_(key, tranc_id);
+  }
+
+  if (current_table->get_size() > TomlConfig::getInstance().getLsmPerMemSizeLimit()) {
+    std::unique_lock frozen_lock(frozen_mtx);
+    frozen_cur_table_();
+  }
 }
 
 void MemTable::clear() {
@@ -208,10 +292,20 @@ MemTable::flush_last(SSTBuilder &builder, std::string &sst_path, size_t sst_id,
 
 void MemTable::frozen_cur_table_() {
   // TODO: 冻结活跃表
+  spdlog::trace("MemTable--frozen_cur_table_(): Freezing current table");
+
+  frozen_bytes += current_table->get_size();
+  frozen_tables.push_front(std::move(current_table));
+  current_table = std::make_shared<SkipList>();
 }
 
 void MemTable::frozen_cur_table() {
   // TODO: 冻结活跃表, 有锁版本
+  spdlog::trace("MemTable--frozen_cur_table_(): Acquiring locks and freezing current table");
+
+  std::unique_lock cur_lock(cur_mtx);
+  std::unique_lock frozen_lock(frozen_mtx);
+  frozen_cur_table_();
 }
 
 size_t MemTable::get_cur_size() {
